@@ -650,22 +650,16 @@ class MSBTFile:
 
         struct.pack_into(f"{endian}H", header, 0x0E, len(sections))
 
-        txt2_magic = TXTW_MAGIC if self.has_txtw else TXT2_MAGIC
-        last_tid = self.text_order[-1] if self.text_order else -1
-        last_slot_all_zero = last_tid >= 0 and not self.texts.get(last_tid, '').strip(chr(0))
-
         with open(filepath, 'wb') as f:
             f.write(header); pos = 32
-            for idx, (mg, sd) in enumerate(sections):
+            for mg, sd in sections:
                 aligned = (len(sd) + 15) & ~15
                 hdr = bytearray(16); hdr[0:4] = mg
                 struct.pack_into(f"{endian}I", hdr, 4, len(sd))
                 f.write(hdr); pos += 16
                 f.write(sd);  pos += len(sd)
                 pad = aligned - len(sd)
-                if pad:
-                    pad_byte = b'\x00' if (mg == txt2_magic and last_slot_all_zero) else b'\xAB'
-                    f.write(pad_byte * pad); pos += pad
+                if pad: f.write(b'\xAB' * pad); pos += pad
             f.seek(0x12); f.write(struct.pack(f"{endian}I", pos))
         # log(f"Saved: {filepath}")
 
