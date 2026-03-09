@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 MSBT Converter for The Legend of Zelda: Tears of the Kingdom
-Convert MSBT files to YAML format and back, with tag processing.
+Convert MSBT files to AEON file format and back, with tag processing.
 """
 
 import os
@@ -76,15 +76,18 @@ def calc_hash(label: str, n: int) -> int:
 # _hex_to_chars : LE-byte hex string  → str of UTF-16 chars
 # ---------------------------------------------------------------------------
 
-def _chars_to_hex(chars: str) -> str:
+def _chars_to_hex(chars: str, big_endian: bool = False) -> str:
     out = []
     for c in chars:
         v = ord(c)
-        out.append(f"{v & 0xFF:02X}{(v >> 8) & 0xFF:02X}")
+        if big_endian:
+            out.append(f"{(v >> 8) & 0xFF:02X}{v & 0xFF:02X}")
+        else:
+            out.append(f"{v & 0xFF:02X}{(v >> 8) & 0xFF:02X}")
     return "".join(out)
 
 
-def _hex_to_chars(hex_str: str) -> str:
+def _hex_to_chars(hex_str: str, big_endian: bool = False) -> str:
     # Use slice [2:], not lstrip — lstrip strips all leading '0'/'x' chars.
     hs = hex_str[2:] if hex_str.startswith(("0x", "0X")) else hex_str
     if not hs:
@@ -94,6 +97,8 @@ def _hex_to_chars(hex_str: str) -> str:
     bs = bytes.fromhex(hs)
     if len(bs) % 2:
         bs += b'\x00'
+    if big_endian:
+        return "".join(chr((bs[k] << 8) | bs[k + 1]) for k in range(0, len(bs), 2))
     return "".join(chr(bs[k] | (bs[k + 1] << 8)) for k in range(0, len(bs), 2))
 
 
@@ -169,11 +174,16 @@ class MSBTFile:
         self.label_id_map: dict = {}
         self.texts: dict   = {}
         self.attributes: dict = {}
+        self.attribute_has_text: bool = False
         self.original_order: list = []
         self.text_order: list = []
         self.raw_sections: dict = {}
         self.tag_defs      = TagDefinitions()
         self.validator     = Validator()
+
+    @property
+    def enc_width(self) -> int:
+        return {'utf-8': 1, 'utf-16': 2, 'utf-32': 4}.get(self.encoding, 2)
 
     def load_tag_definitions(self, fp: str) -> bool:
         return self.tag_defs.load_from_file(fp)
@@ -240,15 +250,16 @@ class MSBTFile:
         for mid, text in self.texts.items():
             i = 0
             while i < len(text):
-                if ord(text[i]) == 0x000E:
+                if ord(text[i]) in (0x000E, 0x000F):
                     if i + 3 > len(text):
                         lbl_name = self.label_id_map.get(mid, f"slot {mid}")
                         v.warn(f"Broken tag at end of text '{lbl_name}' (0x000E without group/type)")
                         break
-                    i += 3  # skip 0E, group, type
-                    if i < len(text):
+                    closing_tag = ord(text[i]) == 0x000F
+                    i += 3  # skip tag marker, group, type
+                    if not closing_tag and i < len(text):
                         byte_count = ord(text[i]); i += 1
-                        char_count = byte_count // 2
+                        char_count = byte_count // self.enc_width
                         if i + char_count > len(text):
                             lbl_name = self.label_id_map.get(mid, f"slot {mid}")
                             v.warn(f"Broken tag args in text '{lbl_name}' (declared {byte_count} arg bytes, but string ends early)")
@@ -302,19 +313,28 @@ class MSBTFile:
         size = struct.unpack_from(f"{endian}I", data, 4)[0]
         enc  = 'utf-16-le' if not self.big_endian else 'utf-16-be'
         attrs: dict = {}
-        if size == 4:
+        sec_size = len(data)
+        attr_length = cnt * 4 + 8
+        enc_width = self.enc_width
+        has_text = size == 4 and sec_size >= attr_length + cnt * enc_width
+        if has_text:
             for i in range(cnt):
                 off = struct.unpack_from(f"{endian}I", data, 8+i*4)[0]
-                if off == 0: attrs[i] = ""; continue
+                if off == 0 or off > sec_size or off < attr_length:
+                    attrs[i] = ""; continue
                 end = off
-                while end+1 < len(data) and not (data[end] == 0 and data[end+1] == 0):
+                while end+1 < sec_size and not (data[end] == 0 and data[end+1] == 0):
                     end += 2
                 try:    attrs[i] = data[off:end].decode(enc).rstrip('\0')
                 except: attrs[i] = "[DECODE ERROR]"
         else:
             for i in range(cnt):
-                s = 8+i*size; e = s+size
-                if e <= len(data): attrs[i] = data[s:e].hex()
+                if size == 0:
+                    attrs[i] = ""
+                else:
+                    s = 8+i*size; e = s+size
+                    if e <= sec_size: attrs[i] = data[s:e].hex()
+        self.attribute_has_text = has_text
         self.attributes = attrs
 
     # ------------------------------------------------------------------
@@ -326,7 +346,7 @@ class MSBTFile:
         if i >= len(text):
             return "", i
         byte_count = ord(text[i]); i += 1
-        char_count = byte_count // 2
+        char_count = byte_count // self.enc_width
         arg = text[i:i + char_count]
         return arg, i + char_count
 
@@ -342,15 +362,27 @@ class MSBTFile:
         otherArg: emitted only when remaining byte count is EVEN (complete chars).
         Odd remainder = alignment padding (e.g. 0xCD after a lone u8) → dropped.
         """
-        if not arg_defs or not arg_data:
+        if not arg_data:
             return {}
+        if not arg_defs:
+            # No defined args but data exists — treat all as otherArg (raw hex)
+            raw = bytearray()
+            w = self.enc_width
+            for c in arg_data:
+                v = ord(c)
+                shifts = range((w-1)*8, -1, -8) if self.big_endian else range(0, w * 8, 8)
+                for shift in shifts:
+                    raw.append((v >> shift) & 0xFF)
+            return {'otherArg': "0x" + raw.hex().upper()}
 
-        # Unpack chars → raw bytes (LE order: low byte first, then high byte)
+        # Unpack chars → raw bytes based on encoding width and endianness
         raw = bytearray()
+        w = self.enc_width
         for c in arg_data:
             v = ord(c)
-            raw.append(v & 0xFF)
-            raw.append((v >> 8) & 0xFF)
+            shifts = range((w-1)*8, -1, -8) if self.big_endian else range(0, w * 8, 8)
+            for shift in shifts:
+                raw.append((v >> shift) & 0xFF)
 
         result: dict = {}
         pos = 0  # byte position
@@ -362,17 +394,29 @@ class MSBTFile:
 
             if dtype == 'str':
                 if pos + 2 > len(raw): break
-                byte_len = raw[pos] | (raw[pos+1] << 8); pos += 2
+                if self.big_endian:
+                    byte_len = (raw[pos] << 8) | raw[pos+1]
+                else:
+                    byte_len = raw[pos] | (raw[pos+1] << 8)
+                pos += 2
                 char_len = byte_len // 2
                 s = ""
                 for _ in range(char_len):
                     if pos + 2 > len(raw): break
-                    s += chr(raw[pos] | (raw[pos+1] << 8)); pos += 2
+                    if self.big_endian:
+                        s += chr((raw[pos] << 8) | raw[pos+1])
+                    else:
+                        s += chr(raw[pos] | (raw[pos+1] << 8))
+                    pos += 2
                 result[name] = s
 
             elif dtype in ('u16', 's16'):
                 if pos + 2 > len(raw): break
-                v = raw[pos] | (raw[pos+1] << 8); pos += 2
+                if self.big_endian:
+                    v = (raw[pos] << 8) | raw[pos+1]
+                else:
+                    v = raw[pos] | (raw[pos+1] << 8)
+                pos += 2
                 if dtype == 's16' and v & 0x8000:
                     v -= 0x10000
                 result[name] = str(v)
@@ -394,12 +438,11 @@ class MSBTFile:
                 result[name] = 'true' if raw[pos] else 'false'
                 pos += 1
 
-        # Remaining bytes → otherArg only when count is EVEN (real data, not padding)
+        # Remaining bytes → otherArg only when aligned to enc_width
         remaining = raw[pos:]
-        if len(remaining) > 0 and len(remaining) % 2 == 0:
-            chars = "".join(chr(remaining[k] | (remaining[k+1] << 8))
-                            for k in range(0, len(remaining), 2))
-            result['otherArg'] = "0x" + _chars_to_hex(chars)
+        # Skip pure 0xCD padding; include any other remaining bytes as otherArg
+        if len(remaining) > 0 and not all(b == 0xCD for b in remaining):
+            result['otherArg'] = "0x" + remaining.hex().upper()
 
         return result
 
@@ -413,15 +456,19 @@ class MSBTFile:
         out = []; i = 0
         while i < len(text):
             ch = ord(text[i])
-            if ch != 0x000E:
+            if ch != 0x000E and ch != 0x000F:
                 out.append(text[i]); i += 1; continue
 
+            closing = ch == 0x000F
             i += 1
             if i + 2 > len(text):
                 out.append(text[i-1:i]); continue
 
             group   = ord(text[i]); i += 1
             type_id = ord(text[i]); i += 1
+
+            if closing:
+                out.append(f"{{{{{group}:{type_id}/}}}}"); continue
 
             arg_data, i = self._read_arg_data(text, i)
 
@@ -433,7 +480,7 @@ class MSBTFile:
                 tag   = "{{" + name + (" " if parts else "") + " ".join(parts) + "}}"
             else:
                 if arg_data:
-                    tag = f'{{{{{group}:{type_id} arg="0x{_chars_to_hex(arg_data)}"}}}}'
+                    tag = f'{{{{{group}:{type_id} arg="0x{_chars_to_hex(arg_data, self.big_endian)}"}}}}'
                 else:
                     tag = f"{{{{{group}:{type_id}}}}}"
             out.append(tag)
@@ -444,19 +491,24 @@ class MSBTFile:
         out = []; i = 0
         while i < len(text):
             ch = ord(text[i])
-            if ch != 0x000E:
+            if ch != 0x000E and ch != 0x000F:
                 out.append(text[i]); i += 1; continue
 
+            closing = ch == 0x000F
             i += 1
             if i + 2 > len(text):
                 out.append(text[i-1:i]); continue
 
             group   = ord(text[i]); i += 1
             type_id = ord(text[i]); i += 1
+
+            if closing:
+                out.append(f"{{{{{group}:{type_id}/}}}}"); continue
+
             arg_data, i = self._read_arg_data(text, i)
 
             if arg_data:
-                out.append(f'{{{{{group}:{type_id} arg="0x{_chars_to_hex(arg_data)}"}}}}'  )
+                out.append(f'{{{{{group}:{type_id} arg="0x{_chars_to_hex(arg_data, self.big_endian)}"}}}}'  )
             else:
                 out.append(f"{{{{{group}:{type_id}}}}}")
 
@@ -490,6 +542,8 @@ class MSBTFile:
         kv       = self._parse_kv(parts[1]) if len(parts) > 1 else {}
 
         td = None
+        closing = tag_name.endswith('/')
+        if closing: tag_name = tag_name.rstrip('/')
         if ":" in tag_name:
             try:
                 g, t = tag_name.split(":", 1)
@@ -508,9 +562,11 @@ class MSBTFile:
             arg_data = self._encode_args(kv, td.get('arguments', []))
         else:
             raw = kv.get('arg', '')
-            arg_data = _hex_to_chars(raw) if raw else ""
+            arg_data = _hex_to_chars(raw, self.big_endian) if raw else ""
 
-        return chr(0x000E) + chr(group) + chr(type_id) + chr(len(arg_data) * 2) + arg_data
+        if closing:
+            return chr(0x000F) + chr(group) + chr(type_id)
+        return chr(0x000E) + chr(group) + chr(type_id) + chr(len(arg_data) * self.enc_width) + arg_data
 
     def _encode_args(self, kv: dict, arg_defs: list) -> str:
         """Encode argument dict to binary UTF-16 char string, working at byte level.
@@ -535,19 +591,31 @@ class MSBTFile:
 
             if dtype == 'str':
                 byte_len = len(val) * 2
-                raw.append(byte_len & 0xFF)
-                raw.append((byte_len >> 8) & 0xFF)
+                if self.big_endian:
+                    raw.append((byte_len >> 8) & 0xFF)
+                    raw.append(byte_len & 0xFF)
+                else:
+                    raw.append(byte_len & 0xFF)
+                    raw.append((byte_len >> 8) & 0xFF)
                 for c in val:
                     v = ord(c)
-                    raw.append(v & 0xFF)
-                    raw.append((v >> 8) & 0xFF)
+                    if self.big_endian:
+                        raw.append((v >> 8) & 0xFF)
+                        raw.append(v & 0xFF)
+                    else:
+                        raw.append(v & 0xFF)
+                        raw.append((v >> 8) & 0xFF)
 
             elif dtype in ('u16', 's16'):
                 v = int(val)
                 if dtype == 's16' and v < 0: v += 0x10000
                 v &= 0xFFFF
-                raw.append(v & 0xFF)
-                raw.append((v >> 8) & 0xFF)
+                if self.big_endian:
+                    raw.append((v >> 8) & 0xFF)
+                    raw.append(v & 0xFF)
+                else:
+                    raw.append(v & 0xFF)
+                    raw.append((v >> 8) & 0xFF)
 
             elif dtype == 'u8':
                 arr = ad.get('arrayLength', 1)
@@ -570,21 +638,30 @@ class MSBTFile:
             elif dtype == 'bool':
                 raw.append(1 if val.lower() == 'true' else 0)
 
-        # Extra args not in GCF (e.g. otherArg) — append as raw LE bytes
+        # Extra args not in GCF (e.g. otherArg) — append as raw bytes
+        extra = bytearray()
         for name, val in kv.items():
             if name in defined: continue
             if val.startswith(("0x", "0X")):
                 hs = val[2:]
                 if len(hs) % 2: hs = "0" + hs
-                try: raw.extend(bytes.fromhex(hs))
+                try: extra.extend(bytes.fromhex(hs))
                 except: pass
 
-        # Pad to even byte count with 0xCD (TotK engine pattern)
-        if len(raw) % 2:
-            raw.append(0xCD)
+        # If extra data present, append directly; otherwise pad defined args to enc_width
+        w = self.enc_width
+        if extra:
+            raw.extend(extra)
+        else:
+            while len(raw) % w:
+                raw.append(0xCD)
 
-        # Pack bytes into UTF-16 chars (LE: low byte, high byte)
-        return "".join(chr(raw[k] | (raw[k+1] << 8)) for k in range(0, len(raw), 2))
+        # Pack bytes into chars of enc_width bytes (pad last char with 0 if needed)
+        while len(raw) % w:
+            raw.append(0)
+        if self.big_endian:
+            return "".join(chr(sum(raw[k+j] << ((w-1-j)*8) for j in range(w))) for k in range(0, len(raw), w))
+        return "".join(chr(sum(raw[k+j] << (j*8) for j in range(w))) for k in range(0, len(raw), w))
 
     def _validate_yaml(self, labels: dict, texts: dict, matches, id_map: dict) -> None:
         v = self.validator
@@ -592,7 +669,7 @@ class MSBTFile:
         # Duplicate label names
         seen_names: dict = {}
         for i, m in enumerate(matches):
-            lbl = m.group(1).strip()
+            lbl = m.group(1).strip('\n\r')
             if lbl in seen_names:
                 v.error(f"Duplicate label '{lbl}' (entries #{seen_names[lbl]+1} and #{i+1})")
             else:
@@ -602,7 +679,7 @@ class MSBTFile:
         if not self.has_lbl1:
             seen_ids: dict = {}
             for i, m in enumerate(matches):
-                lbl = m.group(1).strip()
+                lbl = m.group(1).strip('\n\r')
                 mid = id_map[i]
                 if mid in seen_ids:
                     v.error(f"ID collision: labels '{seen_ids[mid]}' and '{lbl}' both map to slot {mid}")
@@ -619,7 +696,7 @@ class MSBTFile:
         # for i, m in enumerate(matches):
             # text = m.group(3).rstrip('\n') if m.group(3) else ""
             # if not text.strip():
-                # lbl = m.group(1).strip()
+                # lbl = m.group(1).strip('\n\r')
                 # v.warn(f"Label '{lbl}' has empty text")
 
     # ------------------------------------------------------------------
@@ -650,6 +727,10 @@ class MSBTFile:
 
         struct.pack_into(f"{endian}H", header, 0x0E, len(sections))
 
+        txt2_magic = TXTW_MAGIC if self.has_txtw else TXT2_MAGIC
+        last_tid = self.text_order[-1] if self.text_order else -1
+        last_slot_all_zero = last_tid >= 0 and not self.texts.get(last_tid, '').strip(chr(0))
+
         with open(filepath, 'wb') as f:
             f.write(header); pos = 32
             for mg, sd in sections:
@@ -664,22 +745,17 @@ class MSBTFile:
         # log(f"Saved: {filepath}")
 
     def _build_lbl1(self, endian: str) -> bytes:
+        _label_primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101]
+        count = len(self.labels)
+        n = next((p for p in _label_primes if count / 2 < p), _label_primes[-1])
+
         if not self.labels:
-            return bytearray(4)
-
-        def is_prime(n):
-            if n < 2: return False
-            if n < 4: return True
-            if n % 2 == 0 or n % 3 == 0: return False
-            i = 5
-            while i*i <= n:
-                if n % i == 0 or n % (i+2) == 0: return False
-                i += 6
-            return True
-
-        n = self.label_groups if self.label_groups > 0 else max(2, len(self.labels)//2)
-        while not is_prime(n) and n < 101: n += 1
-        if n > 101: n = 101
+            sec = bytearray()
+            sec += struct.pack(f"{endian}I", n)
+            for _ in range(n):
+                sec += struct.pack(f"{endian}I", 0)
+                sec += struct.pack(f"{endian}I", 4 + n * 8)
+            return sec
 
         buckets = [[] for _ in range(n)]
         for name, mid in self.labels.items():
@@ -702,28 +778,35 @@ class MSBTFile:
         return sec
 
     def _build_atr1(self, endian: str):
-        if not self.attributes: return None
-        n   = max(self.attributes) + 1
-        enc = 'utf-16-le' if not self.big_endian else 'utf-16-be'
+        if not self.has_atr1: return None
+        n = (max(self.attributes) + 1) if self.attributes else 0
         sec = bytearray()
-        sec += struct.pack(f"{endian}I", n)
-        sec += struct.pack(f"{endian}I", 4)
-        tbl = len(sec); sec += bytearray(n * 4)
-        om: dict = {}; cur = tbl + n * 4
-        for i in range(n):
-            if i not in self.attributes:
-                om[i] = 0
-                continue
-            a = self.attributes[i]
-            om[i] = cur
-            if a:
-                b = a.encode(enc)
-                if not b.endswith(b'\x00\x00'): b += b'\x00\x00'
-            else:
-                b = b'\x00\x00'
-            sec += b; cur += len(b)
-        for i in range(n):
-            struct.pack_into(f"{endian}I", sec, tbl + i*4, om[i])
+        if self.attribute_has_text:
+            # String table mode: attributeSize=4, offsets + null-terminated strings
+            enc = 'utf-16-le' if not self.big_endian else 'utf-16-be'
+            sec += struct.pack(f"{endian}I", n)
+            sec += struct.pack(f"{endian}I", 4)
+            tbl = len(sec); sec += bytearray(n * 4)
+            om: dict = {}; cur = tbl + n * 4
+            for i in range(n):
+                if i not in self.attributes:
+                    om[i] = 0; continue
+                a = self.attributes[i]
+                om[i] = cur
+                b = (a.encode(enc) + b'\x00\x00') if a else b'\x00\x00'
+                sec += b; cur += len(b)
+            for i in range(n):
+                struct.pack_into(f"{endian}I", sec, tbl + i*4, om[i])
+        else:
+            # Raw bytes mode
+            attr_size = 0
+            for v in self.attributes.values():
+                if v: attr_size = max(attr_size, len(bytes.fromhex(v)))
+            sec += struct.pack(f"{endian}I", n)
+            sec += struct.pack(f"{endian}I", attr_size)
+            for i in range(n):
+                raw = bytes.fromhex(self.attributes[i]) if (i in self.attributes and self.attributes[i]) else b''
+                sec += raw + b'\x00' * (attr_size - len(raw))
         return sec
 
     def _build_txt2(self, endian: str) -> bytes:
@@ -789,7 +872,8 @@ class MSBTFile:
                 entry = "---\n"
                 entry += f"label: {lbl}\n"
                 if self.has_atr1 and mid in self.attributes:
-                    entry += f"attributeText: {self.attributes[mid]}\n"
+                    key = "attributeText" if self.attribute_has_text else "attribute"
+                    entry += f"{key}: {self.attributes[mid]}\n"
                 entry += "---\n"
                 entry += self._process_tags(self.texts[mid])
                 entries.append(entry)
@@ -799,7 +883,8 @@ class MSBTFile:
             entry = "---\n"
             entry += f"label: Text_{mid}\n"
             if self.has_atr1 and mid in self.attributes:
-                entry += f"attributeText: {self.attributes[mid]}\n"
+                key = "attributeText" if self.attribute_has_text else "attribute"
+                entry += f"{key}: {self.attributes[mid]}\n"
             entry += "---\n"
             entry += self._process_tags(text)
             entries.append(entry)
@@ -842,7 +927,7 @@ class MSBTFile:
             elif k == 'hasTXTW':      msbt.has_txtw     = v.lower() == 'true'
 
         entry_re = re.compile(
-            r'---\nlabel: (.*?)(?:\nattributeText: (.*?))?\n---\n(.*?)(?=\n---\n|\Z)',
+            r'---\nlabel: (.*?)(?:\n(?:attributeText|attribute): (.*?))?\n---\n(.*?)(?=\n---\n|\Z)',
             re.DOTALL)
         matches = list(entry_re.finditer(content))
 
@@ -850,7 +935,7 @@ class MSBTFile:
         order: list  = []; id_map: dict = {}; next_id = 0
 
         for i, m in enumerate(matches):
-            lbl = m.group(1).strip()
+            lbl = m.group(1).strip('\n\r')
             if msbt.has_lbl1:
                 mid = next_id; next_id += 1
             else:
@@ -863,7 +948,7 @@ class MSBTFile:
 
         msbt.text_order = []
         for i, m in enumerate(matches):
-            attr = m.group(2).strip() if m.group(2) is not None else None
+            attr = m.group(2).strip('\n\r') if m.group(2) is not None else None
             text = m.group(3)
             if text.endswith('\n'): text = text[:-1]
             mid  = id_map[i]
@@ -877,6 +962,7 @@ class MSBTFile:
         msbt.original_order = order
         msbt.label_id_map  = {mid: lbl for lbl, mid in labels.items()}
         if attrs: msbt.has_atr1 = True
+        msbt.attribute_has_text = 'attributeText:' in content
 
         msbt.validator.filepath = filepath
         msbt._validate_yaml(labels, texts, matches, id_map)
