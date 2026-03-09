@@ -97,6 +97,31 @@ def _hex_to_chars(hex_str: str) -> str:
     return "".join(chr(bs[k] | (bs[k + 1] << 8)) for k in range(0, len(bs), 2))
 
 
+
+def _escape_nulls(s: str) -> str:
+    """Replace runs of null chars with {{0x000000...}} hex tags."""
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == chr(0):
+            j = i
+            while j < len(s) and s[j] == chr(0):
+                j += 1
+            result.append('{{0x' + '00' * (j - i) + '}}')
+            i = j
+        else:
+            result.append(s[i])
+            i += 1
+    return ''.join(result)
+
+
+def _unescape_nulls(s: str) -> str:
+    """Replace {{0x00...}} hex tags back to null chars."""
+    def repl(m):
+        hex_str = m.group(1)
+        return chr(0) * (len(hex_str) // 2)
+    return re.sub(r'\{\{0x((?:00)+)\}\}', repl, s)
+
 class TagDefinitions:
     def __init__(self):
         self.by_group_type: dict = {}
@@ -261,12 +286,13 @@ class MSBTFile:
         txts: dict = {}
         for i in range(num):
             s, e = offs[i], (offs[i+1] if i+1 < num else len(data))
+            raw = data[s:e]
             try:
-                t = data[s:e].decode(enc)
+                t = raw.decode(enc)
                 if t and t[-1] == '\0': t = t[:-1]
                 txts[i] = t
             except UnicodeDecodeError:
-                txts[i] = data[s:e].decode('latin1')
+                txts[i] = raw.decode('latin1')
         self.texts = txts
         self.text_order = list(range(num))
 
@@ -412,7 +438,7 @@ class MSBTFile:
                     tag = f"{{{{{group}:{type_id}}}}}"
             out.append(tag)
 
-        return "".join(out)
+        return _escape_nulls("".join(out))
 
     def _mark_tags_raw(self, text: str) -> str:
         out = []; i = 0
@@ -434,7 +460,7 @@ class MSBTFile:
             else:
                 out.append(f"{{{{{group}:{type_id}}}}}")
 
-        return "".join(out)
+        return _escape_nulls("".join(out))
 
     # ------------------------------------------------------------------
     # readable YAML text → binary text
@@ -447,7 +473,7 @@ class MSBTFile:
             out.append(b if b is not None else m.group(0))
             last = m.end()
         out.append(text[last:])
-        return "".join(out)
+        return _unescape_nulls("".join(out))
 
     @staticmethod
     def _parse_kv(s: str) -> dict:
@@ -624,16 +650,22 @@ class MSBTFile:
 
         struct.pack_into(f"{endian}H", header, 0x0E, len(sections))
 
+        txt2_magic = TXTW_MAGIC if self.has_txtw else TXT2_MAGIC
+        last_tid = self.text_order[-1] if self.text_order else -1
+        last_slot_all_zero = last_tid >= 0 and not self.texts.get(last_tid, '').strip(chr(0))
+
         with open(filepath, 'wb') as f:
             f.write(header); pos = 32
-            for mg, sd in sections:
+            for idx, (mg, sd) in enumerate(sections):
                 aligned = (len(sd) + 15) & ~15
                 hdr = bytearray(16); hdr[0:4] = mg
                 struct.pack_into(f"{endian}I", hdr, 4, len(sd))
                 f.write(hdr); pos += 16
                 f.write(sd);  pos += len(sd)
                 pad = aligned - len(sd)
-                if pad: f.write(b'\xAB' * pad); pos += pad
+                if pad:
+                    pad_byte = b'\x00' if (mg == txt2_magic and last_slot_all_zero) else b'\xAB'
+                    f.write(pad_byte * pad); pos += pad
             f.seek(0x12); f.write(struct.pack(f"{endian}I", pos))
         # log(f"Saved: {filepath}")
 
@@ -685,14 +717,17 @@ class MSBTFile:
         tbl = len(sec); sec += bytearray(n * 4)
         om: dict = {}; cur = tbl + n * 4
         for i in range(n):
-            a = self.attributes.get(i, "")
+            if i not in self.attributes:
+                om[i] = 0
+                continue
+            a = self.attributes[i]
+            om[i] = cur
             if a:
-                om[i] = cur
                 b = a.encode(enc)
                 if not b.endswith(b'\x00\x00'): b += b'\x00\x00'
-                sec += b; cur += len(b)
             else:
-                om[i] = 0
+                b = b'\x00\x00'
+            sec += b; cur += len(b)
         for i in range(n):
             struct.pack_into(f"{endian}I", sec, tbl + i*4, om[i])
         return sec
@@ -759,7 +794,7 @@ class MSBTFile:
             for lbl in id2lbl.get(mid, [f"Text_{mid}"]):
                 entry = "---\n"
                 entry += f"label: {lbl}\n"
-                if mid in self.attributes and self.attributes[mid]:
+                if self.has_atr1 and mid in self.attributes:
                     entry += f"attributeText: {self.attributes[mid]}\n"
                 entry += "---\n"
                 entry += self._process_tags(self.texts[mid])
@@ -769,7 +804,7 @@ class MSBTFile:
             if mid in saved: continue
             entry = "---\n"
             entry += f"label: Text_{mid}\n"
-            if mid in self.attributes and self.attributes[mid]:
+            if self.has_atr1 and mid in self.attributes:
                 entry += f"attributeText: {self.attributes[mid]}\n"
             entry += "---\n"
             entry += self._process_tags(text)
@@ -834,11 +869,12 @@ class MSBTFile:
 
         msbt.text_order = []
         for i, m in enumerate(matches):
-            attr = m.group(2).strip() if m.group(2) else ""
-            text = m.group(3).rstrip('\n')
+            attr = m.group(2).strip() if m.group(2) is not None else None
+            text = m.group(3)
+            if text.endswith('\n'): text = text[:-1]
             mid  = id_map[i]
             texts[mid] = msbt._generate_tags(text)
-            if attr: attrs[mid] = attr
+            if attr is not None: attrs[mid] = attr
             msbt.text_order.append(mid)
 
         msbt.labels        = labels
