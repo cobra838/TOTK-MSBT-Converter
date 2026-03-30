@@ -1,0 +1,574 @@
+# Sources used:
+# msyt Rust source (src/botw/mod.rs) — binary layout, arg sizes, value maps
+# TotK.gcf  — structural cross-reference; groups 0/5/201 are near-identical
+#
+# Notes on known differences from TotK:
+#   • Group 1 delay/autoAdvance store frames as u32 (split into lo+hi u16 here)
+#   • Group 1 types 4/5/6/10 are choice-dialog tags (not present in TotK gcf)
+#   • Group 3  = playSound  (= TotK's setEmotion???)
+#   • Group 4  = playSound2  (= TotK's setEmotion???)
+#   • Group 4  = animation  (≠ TotK's setVoice group 4)
+
+game: "The Legend of Zelda: Breath of the Wild"
+
+sarc:
+  alignment:
+    default: 0x04
+    extensions:
+      ".bflyt": 0x08
+      ".bflan": 0x08
+      ".bfttf": 0x08
+      ".bfotf": 0x08
+      ".bntx":  0x1000
+
+msbt:
+  tags:
+
+  # ── Group 0 · Text formatting ──────────────────────────────────────────────
+
+  # ruby (uncertain semantics in BotW; Control0_0 in msyt)
+  - name: ruby
+    description: ruby annotation rendered above the normal text
+    group: 0
+    type: 0
+    arguments:
+    - name: byteSpan
+      description: number of subsequent characters (as bytes) to render the annotation above (centered)
+      dataType: u16
+    - name: value
+      description: the annotation text (unknown secondary parameter in msyt)
+      dataType: str
+  - name: font
+    group: 0
+    type: 1
+    arguments:
+    - name: face
+      dataType: s16
+      valueMap:
+        -1: Normal
+        0: Hylian
+        4: Unknown
+  - name: size
+    description: changes the current text size
+    group: 0
+    type: 2
+    arguments:
+    - name: value
+      description: relative text size in percent
+      dataType: u16
+  - name: color
+    description: changes the current text color
+    group: 0
+    type: 3
+    arguments:
+    - name: id
+      description: id of the color
+      dataType: s16
+      valueMap:
+        0: Red
+        1: Green # LightGreen1 in msyt
+        2: Cyan # Blue
+        3: Grey
+        4: Azure # LightGreen4
+        5: Orange
+        6: DullGold # LightGrey
+        -1: Reset
+  - name: pageBreak
+    description: forces a new dialog page
+    group: 0
+    type: 4
+
+  # ── Group 1 · Game control sequences ───────────────────────────────────────
+
+  # 1:0 — pause (by frame count); Control1_0 stores frames as u32
+  # For values ≤ 65535 framesHi is always 0.
+  - name: delay # pause in msyt
+    description: delays the text rendering by a given number of frames (u32, split lo/hi)
+    group: 1
+    type: 0
+    arguments:
+    - name: framesLo
+      description: low 16 bits of frame count
+      dataType: u16
+    - name: framesHi
+      description: high 16 bits of frame count (typically 0)
+      dataType: u16
+
+  # 1:1 — text speed? (wiki. msyt does not implement. args unknown); field_2 is a 32-bit value (often IEEE 754 float).
+  - name: textSpeed
+    description: changes text scroll speed, float32 multiplier (1.0 = normal speed)
+    group: 1
+    type: 1
+    arguments:
+    - name: value
+      description: speed multiplier (IEEE 754 float32)
+      dataType: f32
+
+  # 1:2 — no text scroll? (wiki. msyt does not implement. args unknown)
+  - name: noTextScroll
+    description: possibly disables text scrolling; argument structure unknown
+    group: 1
+    type: 2
+
+  # 1:3 — auto-advance dialog; same u32 layout as pause (Control1_3)
+  - name: autoAdvance
+    description: auto-advances dialog after a given number of frames (u32, split lo/hi)
+    group: 1
+    type: 3
+    arguments:
+    - name: framesLo
+      dataType: u16
+    - name: framesHi
+      description: high 16 bits (typically 0)
+      dataType: u16
+
+  # 1:4 — 2-option choice dialog (Control1_4)
+  # Labels are text-slot indices (0-based) within the same MSBT.
+  - name: choice2
+    description: presents a 2-option choice dialog
+    group: 1
+    type: 4
+    arguments:
+    - name: label1
+      description: text slot index for option 1
+      dataType: u16
+    - name: label2
+      description: text slot index for option 2
+      dataType: u16
+    - name: selectedIndex
+      description: default selected option (0-based)
+      dataType: u8
+    - name: cancelIndex
+      description: option selected when B is pressed (0-based)
+      dataType: u8
+
+  # 1:5 — 3-option choice dialog (Control1_5)
+  - name: choice3
+    description: presents a 3-option choice dialog
+    group: 1
+    type: 5
+    arguments:
+    - name: label1
+      dataType: u16
+    - name: label2
+      dataType: u16
+    - name: label3
+      dataType: u16
+    - name: selectedIndex
+      dataType: u8
+    - name: cancelIndex
+      dataType: u8
+
+  # 1:6 — 4-option choice dialog (Control1_6)
+  - name: choice4
+    description: presents a 4-option choice dialog
+    group: 1
+    type: 6
+    arguments:
+    - name: label1
+      dataType: u16
+    - name: label2
+      dataType: u16
+    - name: label3
+      dataType: u16
+    - name: label4
+      dataType: u16
+    - name: selectedIndex
+      dataType: u8
+    - name: cancelIndex
+      dataType: u8
+  - name: icon
+    description: renders an icon
+    group: 1
+    type: 7
+    arguments:
+    - name: type
+      description: icon type
+      dataType: u8
+      valueMap:
+        0: LStickUp # LStickForward in msyt
+        1: LStickDown # LStickBack in msyt
+        2: LStickLeft
+        3: LStickRight
+        4: RStickUpDown # RStickVertical in msyt
+        5: RStickRightLeft # RStickHorizontal in msyt
+        6: DPadUp
+        7: DPadDown
+        8: DPadLeft
+        9: DPadRight
+        10: AButton0 # A in msyt
+        11: AButton1 # A in msyt
+        12: JumpButton0 # X in msyt
+        13: YButton # Y in msyt
+        14: ZLTrigger0 # Zl in msyt
+        15: ZLTrigger1 # Zl in msyt
+        17: SprintButton1 # B in msyt
+        20: LBumper # L in msyt
+        21: RBumper0 # R in msyt
+        23: PlusButton # Plus in msyt
+        24: MinusButton # Minus in msyt
+        25: RightArrow
+        26: LeftArrow
+        27: UpArrow
+        33: LStick # LStickPress in msyt
+        34: RStick # RStickPress in msyt
+        36: Gamepad # nintendo switch in TotK.gcf
+        37: JumpButton1 # X in msyt
+        38: XButton2 # X in msyt
+
+  # 1:8 — three choices based on game flags (wiki: "Choices Based on Flags")
+  # Structure: VarType(u16) + 3×(FlagName:str, ChoiceIndex:u16) + defaultIndex(u16) + cancelIndex(u16)
+  - name: choiceByFlags
+    description: three-option choice dialog where visibility depends on game flags
+    group: 1
+    type: 8
+
+  # 1:9 — five flags (wiki: "Five Flags")
+  # Structure: 4×(FlagIndex:u16, FlagName:str) + 4×FlagValue(u16) + unknown byte array
+  - name: fiveFlags
+    description: stores references to five game flags with associated indices and values
+    group: 1
+    type: 9
+
+  # 1:10 — single-option confirmation choice (Control1_10)
+  - name: singleChoice
+    description: presents a single-option confirmation dialog
+    group: 1
+    type: 10
+    arguments:
+    - name: label
+      description: text slot index for the single option
+      dataType: u16
+    - name: confirmed
+      description: confirmation flag; always 1
+      dataType: u8
+
+  # ── Group 2 · Dynamic text / number substitution ─────────────────────────
+  # variable instead number in msyt
+
+  - name: string1
+    group: 2
+    type: 1
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: number2
+    group: 2
+    type: 2
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: currentHorseName
+    description: gets the name of the current horse
+    group: 2
+    type: 3
+  - name: selectedHorseName
+    description: gets the name of the currently selected horse
+    group: 2
+    type: 4
+  - name: cookingAdjective
+    group: 2
+    type: 7
+  - name: cookingEffectCaption
+    group: 2
+    type: 8
+  - name: number9
+    group: 2
+    type: 9
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+
+  # 2:10 — OneField, no args; BotW-specific (not in TotK.gcf)
+  - name: number10
+    description: single-field number tag (unknown semantics)
+    group: 2
+    type: 10
+
+  - name: string11
+    group: 2
+    type: 11
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: string12
+    group: 2
+    type: 12
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+
+  # 2:13 — OneField, no args; BotW-specific
+  - name: number13
+    description: single-field number tag (unknown semantics)
+    group: 2
+    type: 13
+
+  - name: number14
+    group: 2
+    type: 14
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: number15
+    group: 2
+    type: 15
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: number16
+    group: 2
+    type: 16
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: number17
+    description: BotW-specific number tag (not present in TotK)
+    group: 2
+    type: 17
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: number18
+    group: 2
+    type: 18
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+  - name: number19
+    group: 2
+    type: 19
+    arguments:
+    - name: ref
+      dataType: str
+    - name: index
+      dataType: s16
+
+  # ── Group 3 · Sound effects ─────────────────────────────────────────────────
+  # Control3: type field = 1 for Sound; args are raw binary (no defined structure).
+  # ??? playSound or setEmotion ???
+  - name: setEmotion # sound in msyt
+    description: plays a sound effect; argument bytes are opaque game data
+    group: 3
+    type: 1
+    arguments:
+    - name: emotion
+      dataType: u8
+      valueMap:
+        0: Normal_Face
+        1: Pleasure_Face
+        2: Anger_Face
+        3: Sorrow_Face
+        4: Surprise_Face
+        5: Thinking_Face
+        6: Serious_Face
+        7: Normal
+        8: Pleasure
+        9: Angry
+        10: Sorrow
+        11: Surprise
+        12: Thinking
+        13: Serious
+    - name: variant
+      description: unknown secondary parameter, possibly voice variant or animation sub-type
+      dataType: u8
+
+  # ── Group 4 · Animation / secondary sound ──────────────────────────────────
+    # ??? setVoice or setEmotion ???
+  - name: setVoice
+    description: sets the voice asset for the current speaker
+    group: 4
+    type: 0
+    arguments:
+    - name: asset
+      dataType: str
+
+  # 4:1 — secondary sound effect (Control4_1)
+  # ??? playSound2 or setEmotion2 ???
+  - name: setEmotion2 # sound2 in msyt
+    description: secondary sound effect; argument bytes are opaque game data
+    group: 4
+    type: 1
+    arguments:
+    - name: emotion
+      dataType: u8
+      valueMap:
+        0: Normal_Face
+        1: Pleasure_Face
+        2: Anger_Face
+        3: Sorrow_Face
+        4: Surprise_Face
+        5: Thinking_Face
+        6: Serious_Face
+        7: Normal
+        8: Pleasure
+        9: Angry
+        10: Sorrow
+        11: Surprise
+        12: Thinking
+        13: Serious
+        # 14: 
+        # 15: 
+        # 16: 
+        # 17: 
+        # 18: 
+        # 19: 
+        # 20: 
+        # 21: 
+        # 22: 
+        # 23: 
+        # 24: 
+        # 25: 
+        # 26: 
+        # 27: 
+        # 28: 
+        # 29: 
+        # 30: 
+        # 31: 
+        # 32: 
+        # 33: ???
+        # 34: 
+        # 35: 
+        # 36: 
+        # 37: 
+        # 38: 
+        # 39: 
+        # 40: 
+        # 41: 
+        # 42: 
+        # 43: 
+        # 44: 
+    # - name: variant
+      # description: unknown secondary parameter, possibly voice variant or animation sub-type
+      # dataType: u8
+
+  # 4:2 — trigger a named character animation (Control4_2)
+  - name: animation
+    description: triggers a named NPC / character animation
+    group: 4
+    type: 2
+    arguments:
+    - name: name
+      description: animation asset name
+      dataType: str
+
+  # ── Group 5 · Fixed-length pauses ──────────────────────────────────────────
+
+  - name: delay8 # PauseLength::Short in msyt
+    description: delays the text rendering by 8 frames (PauseLength::Short)
+    group: 5
+    type: 0
+  - name: delay15 # PauseLength::Long in msyt
+    description: delays the text rendering by 15 frames (PauseLength::Long)
+    group: 5
+    type: 1
+  - name: delay30 # PauseLength::Longer in msyt
+    description: delays the text rendering by 30 frames (PauseLength::Longer)
+    group: 5
+    type: 2
+
+  # ── Group 201 (0xC9) · Localisation / Grammar ──────────────────────────────
+  # Structurally identical to TotK; BotW also ships Russian and Korean text.
+
+  - name: wordInfo
+    description: contains grammatical information about a word
+    group: 201
+    type: 0
+    arguments:
+    - name: gender
+      description: id of the gender
+      dataType: u8
+    - name: defArticle
+      description: id of the definite article (DefArt_<id> in StaticMsg/GrammarArticle)
+      dataType: u8
+    - name: indefArticle
+      description: id of the indefinite article (IndefArt_<id> in StaticMsg/GrammarArticle)
+      dataType: u8
+    - name: isPlural
+      description: whether the word is in plural
+      dataType: bool
+  - name: defArticle
+    description: definite article from StaticMsg/GrammarArticle determined by a wordInfo function
+    group: 201
+    type: 1
+  - name: indefArticle
+    description: indefinite article from StaticMsg/GrammarArticle determined by a wordInfo function
+    group: 201
+    type: 2
+  - name: uppercaseNextWord
+    description: transforms the first letter of the next word to uppercase
+    group: 201
+    type: 3
+  - name: lowercaseNextWord
+    description: transforms the first letter of the next word to lowercase
+    group: 201
+    type: 4
+  - name: gender
+    description: contains gender-specific strings; decision on which string to select is determined by a wordInfo function
+    group: 201
+    type: 5
+    arguments:
+    - name: m
+      description: masculine value
+      dataType: str
+    - name: f
+      description: feminine value
+      dataType: str
+    - name: n
+      description: neuter value
+      dataType: str
+  - name: pluralCase
+    group: 201
+    type: 6
+    arguments:
+    - name: arg1
+      dataType: str
+      description: "EUfr/USfr: 0 or 1 item; EUru: numbers ending in 1, but not 11; other languages: 1 item"
+    - name: arg2
+      dataType: str
+      description: "EUfr/USfr: 2 or more items; EUru: numbers ending in 2,3,4, but not 12,13,14; other languages: 0, 2, or more items"
+    - name: arg3
+      dataType: str
+      description: "EUru: numbers ending in 5,6,7,8,9,0, and 11,12,13,14; unused in other languages"
+  - name: batchimObject
+    group: 201
+    type: 7
+    description: korean support consonant in a syllable, specifically if referring to an object
+    arguments:
+    - name: consonant
+      dataType: str
+      description: the value to insert if the syllable block ends with a consonant
+    - name: vowel
+      dataType: str
+      description: the value to insert if the syllable block ends with a vowel
+  - name: batchimDirection
+    group: 201
+    type: 8
+    description: korean support consonant in a syllable, specifically if referring to a direction
+    arguments:
+    - name: consonant
+      dataType: str
+      description: the value to insert if the syllable block ends with a consonant
+    - name: vowel
+      dataType: str
+      description: the value to insert if the syllable block ends with a vowel

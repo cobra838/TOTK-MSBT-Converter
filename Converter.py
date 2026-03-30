@@ -159,27 +159,28 @@ class TagDefinitions:
 
 class MSBTFile:
     def __init__(self):
-        self.big_endian    = False
-        self.version       = 3
-        self.encoding      = 'utf-16'
-        self.file_size     = 0
-        self.has_lbl1      = False
-        self.has_atr1      = False
-        self.has_ato1      = False
-        self.has_tsy1      = False
-        self.has_nli1      = False
-        self.has_txtw      = False
-        self.label_groups  = 0
-        self.labels: dict  = {}
+        self.big_endian = False
+        self.version = 3
+        self.encoding = 'utf-16'
+        self.file_size = 0
+        self.has_lbl1 = False
+        self.has_atr1 = False
+        self.has_ato1 = False
+        self.has_tsy1 = False
+        self.has_nli1 = False
+        self.has_txtw = False
+        self.label_groups = 0
+        self.labels: dict = {}
         self.label_id_map: dict = {}
-        self.texts: dict   = {}
+        self.texts: dict = {}
         self.attributes: dict = {}
         self.attribute_has_text: bool = False
         self.original_order: list = []
         self.text_order: list = []
         self.raw_sections: dict = {}
-        self.tag_defs      = TagDefinitions()
-        self.validator     = Validator()
+        self.tag_defs = TagDefinitions()
+        self.validator = Validator()
+        self.lbl1_groups_mode = "d"
 
     @property
     def enc_width(self) -> int:
@@ -419,7 +420,8 @@ class MSBTFile:
                 pos += 2
                 if dtype == 's16' and v & 0x8000:
                     v -= 0x10000
-                result[name] = str(v)
+                value_map = ad.get('valueMap', {})
+                result[name] = str(value_map.get(v, v))
 
             elif dtype == 'u8':
                 arr = ad.get('arrayLength', 1)
@@ -437,6 +439,14 @@ class MSBTFile:
                 if pos >= len(raw): break
                 result[name] = 'true' if raw[pos] else 'false'
                 pos += 1
+
+            # very carefully!
+            elif dtype == 'f32':
+                if pos + 4 > len(raw): break
+                fmt = ('>' if self.big_endian else '<') + 'f'
+                v = struct.unpack_from(fmt, bytes(raw), pos)[0]
+                pos += 4
+                result[name] = repr(v)
 
         # Remaining bytes → otherArg only when aligned to enc_width
         remaining = raw[pos:]
@@ -607,6 +617,9 @@ class MSBTFile:
                         raw.append((v >> 8) & 0xFF)
 
             elif dtype in ('u16', 's16'):
+                value_map = ad.get('valueMap', {})
+                reverse_map = {str(mv): k for k, mv in value_map.items()}
+                val = reverse_map.get(val, val)
                 v = int(val)
                 if dtype == 's16' and v < 0: v += 0x10000
                 v &= 0xFFFF
@@ -637,6 +650,15 @@ class MSBTFile:
 
             elif dtype == 'bool':
                 raw.append(1 if val.lower() == 'true' else 0)
+
+            # very very carefully!
+            elif dtype == 'f32':
+                try:
+                    fmt = ('>' if self.big_endian else '<') + 'f'
+                    raw.extend(struct.pack(fmt, float(val)))
+                except (ValueError, struct.error):
+                    log(f"Invalid f32 value: {val!r}", "WARNING")
+                    raw.extend(b'\x00\x00\x00\x00')
 
         # Extra args not in GCF (e.g. otherArg) — append as raw bytes
         extra = bytearray()
@@ -747,7 +769,12 @@ class MSBTFile:
     def _build_lbl1(self, endian: str) -> bytes:
         _label_primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101]
         count = len(self.labels)
-        n = next((p for p in _label_primes if count / 2 < p), _label_primes[-1])
+        if self.lbl1_groups_mode == "l":
+            n = len(self.labels)
+        elif self.lbl1_groups_mode == "o" and self.label_groups > 0:
+            n = self.label_groups
+        else:
+            n = next((p for p in _label_primes if count / 2 < p), _label_primes[-1])
 
         if not self.labels:
             sec = bytearray()
@@ -977,10 +1004,11 @@ def main():
     global DEBUG
     p = argparse.ArgumentParser(description="MSBT Converter")
     p.add_argument('files', nargs='*')
-    p.add_argument('--output-dir',        '-o')
-    p.add_argument('--debug',             '-d', action='store_true')
+    p.add_argument('--output-dir', '-o')
+    p.add_argument('--debug', '-d', action='store_true')
     p.add_argument('--continue-on-error', '-c', action='store_true')
-    p.add_argument('--tag-definitions',   '-t')
+    p.add_argument('--tag-definitions', '-t')
+    p.add_argument('--lbl1-groups', '-l', choices=['d', 'l', 'o'], default='d', help='LBL1 bucket count mode: d=prime-based count / 2 (default), l=label count from file, o=take labelGroups from file metadata')
     args  = p.parse_args()
     DEBUG = args.debug
 
@@ -1059,6 +1087,7 @@ def _process_file(filepath: str, args, out_dir=None) -> 'Validator | None':
         if ext == '.msbt':
             msbt = MSBTFile()
             if args.tag_definitions: msbt.load_tag_definitions(args.tag_definitions)
+            msbt.lbl1_groups_mode = getattr(args, 'lbl1_groups', "d")
             msbt.load_from_file(filepath)
             out_name = os.path.splitext(os.path.basename(filepath))[0] + '.yaml'
             out = os.path.join(out_dir, out_name) if out_dir else \
@@ -1069,6 +1098,7 @@ def _process_file(filepath: str, args, out_dir=None) -> 'Validator | None':
             return msbt.validator
         elif ext == '.yaml':
             msbt = MSBTFile.from_yaml(filepath, args.tag_definitions)
+            msbt.lbl1_groups_mode = getattr(args, 'lbl1_groups', "d")
             out_name = os.path.splitext(os.path.basename(filepath))[0] + '.msbt'
             out = os.path.join(out_dir, out_name) if out_dir else \
                   os.path.splitext(filepath)[0] + '.msbt'
