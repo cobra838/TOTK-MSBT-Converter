@@ -11,16 +11,6 @@
 
 game: "The Legend of Zelda: Breath of the Wild"
 
-sarc:
-  alignment:
-    default: 0x04
-    extensions:
-      ".bflyt": 0x08
-      ".bflan": 0x08
-      ".bfttf": 0x08
-      ".bfotf": 0x08
-      ".bntx":  0x1000
-
 msbt:
   tags:
 
@@ -222,6 +212,25 @@ msbt:
     description: three-option choice dialog where visibility depends on game flags
     group: 1
     type: 8
+    arguments:
+    - name: varType
+      dataType: u16
+    - name: flag1
+      dataType: str
+    - name: choice1
+      dataType: u16
+    - name: flag2
+      dataType: str
+    - name: choice2
+      dataType: u16
+    - name: flag3
+      dataType: str
+    - name: choice3
+      dataType: u16
+    - name: default
+      dataType: u16
+    - name: cancel
+      dataType: u16
 
   # 1:9 — five flags (wiki: "Five Flags")
   # Structure: 4×(FlagIndex:u16, FlagName:str) + 4×FlagValue(u16) + unknown byte array
@@ -229,6 +238,41 @@ msbt:
     description: stores references to five game flags with associated indices and values
     group: 1
     type: 9
+    arguments:
+    - name: flagIdx1
+      dataType: u16
+    - name: name1
+      dataType: str
+    - name: flagIdx2
+      dataType: u16
+    - name: name2
+      dataType: str
+    - name: flagIdx3
+      dataType: u16
+    - name: name3
+      dataType: str
+    - name: flagIdx4
+      dataType: u16
+    - name: name4
+      dataType: str
+    - name: flagIdx5
+      dataType: u16
+    - name: name5
+      dataType: str
+    - name: slot1
+      dataType: u16
+    - name: cond1
+      dataType: u16
+    - name: slot2
+      dataType: u16
+    - name: cond2
+      dataType: u16
+    - name: slot3
+      dataType: u16
+    - name: cond3
+      dataType: u16
+    - name: cancel
+      dataType: u16
 
   # 1:10 — single-option confirmation choice (Control1_10)
   - name: singleChoice

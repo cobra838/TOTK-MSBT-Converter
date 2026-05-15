@@ -82,6 +82,14 @@ msbt:
     - name: id
       description: id of the color
       dataType: s16
+      valueMap:
+        0: Red #ff2209
+        1: Cyan #00ffff
+        2: Grey #ffffff40 (White)
+        3: DarkRed #a31401
+        4: Green #5b996d
+        5: Magenta #ff00fe
+        -1: Reset #000000
   - name: pageBreak
     description: forces a new dialog page
     group: 0
